@@ -5,6 +5,8 @@ class Data {
     url = "https://metanit.com"
 }
 
+type Parsed = [{ name: string, links: [string, string][]}[] | [string, string][], string]
+
 class MetanitParser {
     private data: Data = new Data()
     // словарь для кеширования страниц сайта (в рамках одного процесса). Прагматичной цели для парсинга при этом не подразумевается
@@ -76,11 +78,14 @@ class MetanitParser {
         return this.tutorialLinks
     }
 
-    // результат - ссылки на следующие материалы в виде массива и контент
-    parsePage(html: string): [[string, string][], string] {
+    // результат при парсинге страницы раздела - ссылки на следующие материалы в виде массива и контент
+    // результат при парсинге страницы руководства - массив объектов с названиями глав и массивом параграфов (материалов) и контент
+    parsePage(html: string): Parsed {
         // переменные результата
         let links: Array<[string, string]> = []
         let content: string | null
+        // структура глав (при парсинге руководства)
+        let tree: Array<{ name: string, links: [string, string][]}> = []
 
         const $ = cheerio.load(html)
         const $innerContainer = $(".innercontainer")
@@ -95,17 +100,60 @@ class MetanitParser {
 
         const $2 = cheerio.load(innerHtml)
 
+        // поиск навигации при парсинге в разделе
         const $a = $2(".navmenu > a")
 
-        $a.each((_, element) => {
-            const href = $2(element).attr('href')
-            if (href) {
-                const fullUrl = new URL(href, this.data.url).href
-                const name = $2(element).text()
-                links.push([fullUrl, name])
-            }
-        })
+        if ($a.length > 0) {
+            $a.each((_, element) => {
+                const href = $2(element).attr('href')
+                if (href) {
+                    const fullUrl = new URL(href, this.data.url).href
+                    const name = $2(element).text()
+                    links.push([fullUrl, name])
+                }
+            })
+        } else {
+            // получение структуры глав и параграфов при парсинге в руководстве
+            const $fileTree = $2(".filetree > li")
 
+            if ($fileTree.length <= 0) {
+                throw err
+            }
+
+            $fileTree.each((_, element) => {
+                let innerHtml = $2(element).html()
+                if (innerHtml) {
+                    const $_folder = cheerio.load(innerHtml)
+                    // получение названия главы
+                    const $folder = $_folder('.folder')
+                    const name = $folder.text()
+                    // получение параграфов
+                    const paragraphs: Array<[string, string]> = []
+                    const $files = $_folder('.file > a')
+
+                    if ($files.length <= 0) {
+                        return
+                    }
+                    $files.each((_, element) => {
+                        const href = $_folder(element).attr('href')
+                        let url = ""
+                        if (href) {
+                            url = new URL(href, this.data.url).href
+                        }
+                        const name = $_folder(element).text()
+                        paragraphs.push([url, name])
+                    })
+
+                    // добавление в структуру
+                    tree.push({
+                        name: name,
+                        links: paragraphs
+                    })
+                }
+            })
+        }
+
+        // получение содержания страницы
         const $itemCenter = $2(".item.center")
 
         content = $itemCenter.html()
@@ -118,7 +166,7 @@ class MetanitParser {
     }
 
     // результат - ссылки на следующие материалы в виде массива и контент (на главной странице)
-    async getMainContent(): Promise<[[string, string][], string]> {
+    async getMainContent(): Promise<Parsed> {
         let html: string
 
         try {
@@ -141,13 +189,20 @@ class MetanitParser {
         return [links, content]
     }
 
+    // остается парсинг цельных страниц
+    // притом с параметром рекурсивного или нет
+    // при рекурсивном, если парсится раздел, то возможного повтора результатов парсинга следует избежать
+    // в разделах также ссылки на руководства даются в самом содержании, из которого отдельным образом нужно добывать ссылки и парсить при рекурсии
+    // при парсинге руководств такой задачи нет, при рекурсии там просто последовательный обход параграфов в главах по боковой структуре на сайте
+    // async getPage(url: string)
+
     async run() {
         const links = await this.getTutorialLinks()
         console.log(links)
 
-        const [linksPage, content] = await this.getMainContent()
-        console.log("\n\nLinks Page\n\n")
-        console.log(linksPage)
+        const [mainLinks, content] = await this.getMainContent()
+        console.log("\n\nMain Links\n\n")
+        console.log(mainLinks)
         console.log("\n\nContent\n\n")
         console.log(content)
     }
