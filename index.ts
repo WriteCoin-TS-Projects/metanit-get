@@ -5,7 +5,10 @@ class Data {
     url = "https://metanit.com"
 }
 
-type Parsed = [{ name: string, links: [string, string][]}[] | [string, string][], string]
+type Link = [string, string]
+type Folder = { name: string, links: Link[] }
+type Parsed = [Folder[] | Link[], string]
+type ParsedRecursion = Parsed | Array<Parsed | ParsedRecursion>
 
 class MetanitParser {
     private data: Data = new Data()
@@ -189,12 +192,109 @@ class MetanitParser {
         return [links, content]
     }
 
+    isChapter(link: Folder | Link): boolean {
+        if (Array.isArray(link) && link.length === 2) {
+            return true
+        } else if ('name' in link) {
+            return false
+        }
+        throw Error("Ошибка определения типа спарсированной страницы")
+    }
+
     // остается парсинг цельных страниц
     // притом с параметром рекурсивного или нет
     // при рекурсивном, если парсится раздел, то возможного повтора результатов парсинга следует избежать
     // в разделах также ссылки на руководства даются в самом содержании, из которого отдельным образом нужно добывать ссылки и парсить при рекурсии
     // при парсинге руководств такой задачи нет, при рекурсии там просто последовательный обход параграфов в главах по боковой структуре на сайте
-    // async getPage(url: string)
+    async getPage(url: string, recursive: boolean = false, previousPage?: Parsed): Promise<ParsedRecursion> {
+        let html: string
+
+        try {
+            const response = await this.getHtml(url)
+
+            if (response) {
+                html = response
+            } else {
+                throw Error()
+            }
+        } catch (error) {
+            if (error instanceof Error) {
+                console.error(`Не удалось получить html страницы ${url}. Ошибка выше`)
+            }
+            throw error
+        }
+
+        const parsed = this.parsePage(html)
+
+        
+        // условие остановки рекурсии - одинаковая структура в боковой панели, т.е. ссылок у разделов или папок с файлами у руководств
+        if (previousPage && previousPage[0].length === parsed[0].length) {
+            // проверка на одинаковое содержимое
+            
+            for (let i = 0; i < previousPage[0].length; i++) {
+                const linksPrevious = previousPage[0][i]
+                const linksPage = parsed[0][i]
+
+                if (!linksPrevious || !linksPage) {
+                    throw Error(`Обнаружено недопустимое отсутствие ссылок на стадии получения url: ${url}`)
+                }
+
+                if (Array.isArray(linksPrevious) && linksPrevious.length === 2 && Array.isArray(linksPage) && linksPage.length === 2) {
+                    // условие остановки - сравнение первых элементов кортежа, т.е. URL (второй элемент, отвечающий за название, вероятно, необязательно)
+                    if (linksPrevious[0] === linksPage[0]) {
+                        recursive = false
+                        break
+                    }
+                } else if ('links' in linksPrevious && 'links' in linksPage) {
+                    // условие остановки - сравнение первых параграфов
+                    const linkPrevious = linksPrevious.links[0]
+                    const linkPage = linksPage.links[0]
+
+                    if (!linkPrevious || !linkPage) {
+                        throw Error(`Обнаружено недопустимое отсутствие ссылок на стадии получения url: ${url}`)
+                    }
+
+                    if (linkPrevious[0] === linkPage[0]) {
+                        recursive = false
+                        break
+                    }
+                }
+            }
+        }
+
+        if (recursive) {
+            const [links, _] = parsed
+            const result: ParsedRecursion = []
+
+            let firstParsedNotFirst = false
+
+            for (const linksElement of links) {
+                // проверка, что кортеж и значит ссылка раздела (не руководства)
+                if (Array.isArray(linksElement) && linksElement.length === 2) {
+                    const [urlElement, _] = linksElement
+                    if (urlElement !== url) {
+                        // получение вложенной страницы и добавление результата
+                        const page = await this.getPage(urlElement, recursive)
+                        result.push(page)
+                    } else {
+                        result.push(parsed)
+                        firstParsedNotFirst = true
+                    }
+                } else if ('name' in linksElement) {
+                    linksElement
+                }
+            }
+
+            // добавление результата первого парсинга в начало, если был дубликат url при первой рекурсии
+            if (!firstParsedNotFirst) {
+                result.unshift(parsed)
+            }
+
+            return result
+        }
+
+        return parsed
+    }
 
     async run() {
         const links = await this.getTutorialLinks()
